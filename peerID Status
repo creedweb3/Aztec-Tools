@@ -1,0 +1,29 @@
+#!/bin/bash
+clear
+# Extract PeerID from Docker logs (three fallback methods)
+peerid=$(sudo docker logs $(docker ps -q --filter "name=aztec" | head -1) 2>&1 | \
+  grep -m 1 -ai 'DiscV5 service started' | grep -o '"peerId":"[^"]*"' | cut -d'"' -f4)
+if [ -z "$peerid" ]; then
+  container_id=$(sudo docker ps --filter "ancestor=$(sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep aztec | head -1)" -q | head -1)
+  if [ ! -z "$container_id" ]; then
+    peerid=$(sudo docker logs $container_id 2>&1 | \
+      grep -m 1 -ai 'DiscV5 service started' | grep -o '"peerId":"[^"]*"' | cut -d'"' -f4)
+  fi
+fi
+if [ -z "$peerid" ]; then
+  peerid=$(sudo docker logs $(docker ps -q --filter "name=aztec" | head -1) 2>&1 | \
+    grep -m 1 -ai '"peerId"' | grep -o '"peerId":"[^"]*"' | cut -d'"' -f4)
+fi
+header=" ● PeerID"
+if [ -n "$peerid" ]; then
+  peerline="✓ $peerid"
+  width=${#header}
+  [ ${#peerline} -gt $width ] && width=${#peerline}
+  div=$(printf -- '=%.0s' $(seq 1 $width))
+  echo "$div"
+  echo "$header"
+  echo -e "\e[1;32m$peerline\e[0m"
+  echo "$div"
+else
+  echo -e "\e[1;31mNo Aztec PeerID found ✗\e[0m"
+fi

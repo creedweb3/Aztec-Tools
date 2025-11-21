@@ -1,0 +1,540 @@
+#!/bin/bash
+
+# Reusable color tags
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+CYAN='\033[1;36m'
+YELLOW='\033[1;33m'
+NC='\033[0m'  # No Color / Reset
+
+print_message() {
+  # Use yellow for all explanatory messages except the wait message below
+  echo -e "${YELLOW}$1${NC}"
+}
+
+print_prompt() {
+  echo -ne "> "
+}
+
+print_prompt_with_recommendation() {
+  # Use yellow for prompt label, green for recommendation
+  echo -e "${YELLOW}$1 ${GREEN}($2)${NC}"
+  echo -ne "> "
+}
+
+print_success() {
+  echo -e "${GREEN}✔ $1${NC}"
+}
+
+print_error() {
+  echo -e "${RED}✖ $1${NC}"
+}
+
+print_input_summary() {
+  clear
+  echo "=================================================="
+  echo "                INPUTS AND SETTINGS               "
+  echo "=================================================="
+  printf "Validators Count           : %d\n" "$num_validators"
+  printf "Attester Mode             : %s\n" "$attester_mode"
+  printf "Ethereum RPC URL          : %s\n" "$ETH_RPC"
+  printf "Main Withdrawer           : %s\n" "$main_withdrawer"
+  echo "--------------------------------------------------"
+  echo "Old Private Keys (count)   : ${#private_keys[@]}"
+  echo "Attester Addresses (count): ${#attesters[@]}"
+  echo "--------------------------------------------------"
+  echo "Validators:"
+  echo
+  for (( i=0; i<num_validators; i++ )); do
+    idx=$((i+1))
+    echo "● Validator $idx"
+    printf "    Old Attester PK      : %s\n" "${private_keys[i]}"
+    if [[ "$attester_mode" == "new" ]]; then
+      printf "    New Attester PK      : %s\n" "${new_eth_private_keys[i]}"
+    fi
+    printf "    Attester Type        : %s\n" "$attester_mode"
+    printf "    Attester Address     : %s\n" "${attesters[i]}"
+    printf "    BLS Key              : %s\n" "${bls_keys[i]}"
+    echo "--------------------------------------------------"
+  done
+  echo
+}
+
+print_reminders_colored() {
+  local sep="==============================================================="
+  echo -e "${GREEN}$sep"
+  echo "                    IMPORTANT REMINDERS                         "
+  echo "$sep${NC}"
+
+  echo "Please SAVE your BLS and Ethereum mnemonics & keys securely."
+  echo "You will NOT be able to recover them if lost!"
+  echo
+  echo -e "A backup summary JSON file has been saved here:"
+  echo -e "  ${YELLOW}$summary_file${NC}"
+  echo
+  echo "For security, consider moving this backup to a safe location and"
+  echo "then securely deleting it from this machine when no longer needed."
+  echo
+  echo -e "${YELLOW}Change your .env file or node setup if you registered with \"new\" attesters mode.${NC}"
+  echo -e "${GREEN}$sep${NC}"
+  echo
+}
+
+validate_mnemonic() {
+  local mnemonic="$1"
+  node --input-type=module -e "
+import bip39 from 'bip39';
+console.log(bip39.validateMnemonic(process.argv[1]));
+" "$mnemonic"
+}
+
+print_warning_fill_wallets() {
+  local tries=0
+  local max_tries=3
+  local confirm_fund
+
+  echo -e "${YELLOW}⚠️ Please fund each private key wallet with at least 0.001 Sepolia ETH.${NC}"
+  while (( tries < max_tries )); do
+    echo -ne "Have you topped up all wallets? (yes/no) > "
+    read confirm_fund
+    if [[ "$confirm_fund" =~ ^[Yy][Ee]?[Ss]?$ ]]; then
+      return 0
+    elif [[ "$confirm_fund" =~ ^[Nn][Oo]?$ ]]; then
+      echo -e "${RED}Funding is required to proceed. Aborting.${NC}"
+      exit 1
+    else
+      echo -e "${RED}Please enter a valid response: yes or no.${NC}"
+      ((tries++))
+    fi
+  done
+
+  echo -e "${RED}Max attempts reached. Aborting.${NC}"
+  exit 1
+}
+
+install_node_and_npm() {
+  if ! command -v node &>/dev/null || ! command -v npm &>/dev/null; then
+    echo -e "${CYAN}• Node.js or npm not found. Installing (this may take a few minutes)...${NC}"
+    apt-get update >/dev/null 2>&1
+    apt-get install -y nodejs npm >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      echo -e "${RED}✖ Failed to install Node.js and npm. Please install manually.${NC}"
+      return 1
+    fi
+    echo -e "${GREEN}✔ Node.js and npm installed.${NC}"
+  else
+    echo -e "${GREEN}✔ Node.js and npm are already installed.${NC}"
+  fi
+}
+
+main() {
+  clear
+
+  export PATH="$HOME/.aztec/bin:$HOME/.foundry/bin:$PATH"
+  NODE_MODULES_DIR="./node_modules"
+
+  if [ -d "$HOME/.aztec" ]; then
+    echo -e "${CYAN}• Removing existing ~/.aztec directory to avoid stale keystores...${NC}"
+    rm -rf "$HOME/.aztec" >/dev/null 2>&1
+  fi
+
+  install_aztec_cli() {
+    echo -e "${CYAN}• Aztec CLI not found, installing silently...${NC}"
+    yes | bash -i <(curl -s https://install.aztec.network) >/dev/null 2>&1
+    echo 'export PATH="$HOME/.aztec/bin:$PATH"' >> ~/.bashrc
+    export PATH="$HOME/.aztec/bin:$PATH"
+    source ~/.bashrc >/dev/null 2>&1
+    aztec-up >/dev/null 2>&1
+  }
+
+  install_foundry() {
+    echo -e "${CYAN}• Foundry not found, installing silently...${NC}"
+    yes | curl -L https://foundry.paradigm.xyz | bash >/dev/null 2>&1
+    export PATH="$HOME/.foundry/bin:$PATH"
+    source ~/.bashrc >/dev/null 2>&1
+    foundryup >/dev/null 2>&1
+  }
+
+  if ! command -v aztec &>/dev/null; then
+    install_aztec_cli
+    if ! command -v aztec &>/dev/null; then
+      print_error "Aztec CLI installation failed."
+      return 1
+    fi
+    print_success "Aztec CLI installed."
+  fi
+
+  if ! command -v cast &>/dev/null; then
+    install_foundry
+    if ! command -v cast &>/dev/null; then
+      print_error "Foundry (cast) installation failed."
+      return 1
+    fi
+    print_success "Foundry installed."
+  fi
+
+  # Check and install Node.js and npm if missing
+  install_node_and_npm || return 1
+
+  # Install required Node.js packages
+  echo -e "${CYAN}• Installing required Node.js packages silently...${NC}"
+  npm install bip39 @chainsafe/bls ethers jq >/dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    print_error "Node.js package installation failed. See above for details."
+    return 1
+  fi
+  print_success "Node.js packages installed."
+
+  export NODE_PATH="$NODE_MODULES_DIR"
+
+  # Input Ethereum RPC URL
+  tries=0
+  while (( tries < 3 )); do
+    print_message "Enter Ethereum RPC URL"
+    print_prompt
+    read ETH_RPC
+    if [[ -n "$ETH_RPC" ]]; then break; fi
+    print_error "RPC URL cannot be empty."
+    ((tries++))
+  done
+  if (( tries == 3 )); then
+    print_error "Max attempts reached for Ethereum RPC URL."
+    return 1
+  fi
+
+  ROLLUP_ADDRESS="0xebd99ff0ff6677205509ae73f93d0ca52ac85d67"
+  STAKE_CONTRACT="0x139d2a7a0881e16332d7D1F8DB383A4507E1Ea7A"
+
+  ROLLUP_ADDRESS="${ROLLUP_ADDRESS,,}"
+  STAKE_CONTRACT="${STAKE_CONTRACT,,}"
+
+  if [[ ${#ROLLUP_ADDRESS} -ne 42 ]]; then
+    print_error "Rollup address length invalid."
+    return 1
+  fi
+  if [[ ${#STAKE_CONTRACT} -ne 42 ]]; then
+    print_error "Stake contract address length invalid."
+    return 1
+  fi
+
+  STAKE_AMOUNT="200000ether"
+
+  cleanup() {
+    if [ -d "$NODE_MODULES_DIR" ]; then
+      echo -e "${CYAN}• Cleaning up Node.js modules...${NC}"
+      rm -rf "$NODE_MODULES_DIR" >/dev/null 2>&1
+    fi
+  }
+  trap cleanup EXIT
+
+  # Number of validators
+  tries=0
+  while (( tries < 3 )); do
+    print_message "Enter number of validators to register"
+    print_prompt
+    read num_validators
+    if [[ -n "$num_validators" ]]; then break; fi
+    print_error "Number of validators cannot be empty."
+    ((tries++))
+  done
+  if (( tries == 3 )); then
+    print_error "Max attempts reached for number of validators."
+    return 1
+  fi
+
+  # Attester mode
+  tries=0
+  while (( tries < 3 )); do
+    print_prompt_with_recommendation "Choose Attester Mode: Enter old/new" "Recommended attester mode is: new"
+    read attester_mode
+    if [[ "$attester_mode" == "old" || "$attester_mode" == "new" ]]; then break; fi
+    print_error "Please enter 'old' or 'new'."
+    ((tries++))
+  done
+  if (( tries == 3 )); then
+    print_error "Max attempts reached for attester mode."
+    return 1
+  fi
+
+  # BLS mnemonic
+  tries=0
+  while (( tries < 3 )); do
+    print_message "Enter BLS mnemonic or leave blank to generate new"
+    print_prompt
+    read bls_mnemonic
+    if [[ -z "$bls_mnemonic" ]]; then
+      bls_mnemonic=$(node --input-type=module -e "
+import bip39 from 'bip39';
+console.log(bip39.generateMnemonic(128));
+      ")
+      echo -e "${GREEN}✔ Generated mnemonic:${NC} $bls_mnemonic"
+      break
+    else
+      valid_check=$(validate_mnemonic "$bls_mnemonic")
+      if [[ "$valid_check" == "true" ]]; then
+        print_success "Mnemonic entered"
+        break
+      else
+        print_error "Invalid BLS mnemonic entered."
+        ((tries++))
+      fi
+    fi
+  done
+  if (( tries == 3 )); then
+    print_error "Max attempts reached for BLS mnemonic."
+    return 1
+  fi
+
+  KEYSTORE_DIR="$HOME/.aztec/keystore"
+  mkdir -p "$KEYSTORE_DIR"
+
+  echo -e "${CYAN}• Generating validator keys, this may take some time...${NC}"
+  aztec validator-keys new \
+    --count "$num_validators" \
+    --fee-recipient 0x0000000000000000000000000000000000000000000000000000000000000000 \
+    --mnemonic "$bls_mnemonic" \
+    --out-dir "$KEYSTORE_DIR" >/dev/null 2>&1
+
+  KEYFILE="$KEYSTORE_DIR/key1.json"
+  if [ ! -f "$KEYFILE" ]; then
+    print_error "Keystore file $KEYFILE not found."
+    return 1
+  fi
+
+  declare -a new_eth_private_keys bls_keys attesters private_keys attesters_old
+
+  for (( i=0; i<num_validators; i++ )); do
+    bls_priv=$(jq -r ".validators[$i].attester.bls" "$KEYFILE")
+    if [[ -z "$bls_priv" || "$bls_priv" == "null" ]]; then
+      print_error "Missing BLS private key for validator $((i+1))"
+      return 1
+    fi
+    bls_keys+=("$bls_priv")
+  done
+
+  # OLD private keys input with normalization and validation
+  tries=0
+  while (( tries < 3 )); do
+    print_message "Enter OLD private keys (comma-separated, $num_validators keys)"
+    print_prompt
+    read input_keys
+    IFS=',' read -ra parts <<< "$input_keys"
+    if [[ "${#parts[@]}" -ne num_validators ]]; then
+      print_error "Expected $num_validators keys but got ${#parts[@]}"
+      ((tries++))
+      continue
+    fi
+    valid=true
+    for i in "${!parts[@]}"; do
+      key="${parts[i],,}"
+      if [[ ! "$key" =~ ^0x ]]; then
+        key="0x$key"
+      fi
+      if [[ ! "$key" =~ ^0x[a-f0-9]{64}$ ]]; then
+        valid=false
+        break
+      fi
+      parts[i]="$key"
+    done
+    if $valid; then
+      private_keys=("${parts[@]}")
+      break
+    else
+      print_error "Invalid private key format detected."
+      ((tries++))
+    fi
+  done
+  if (( tries == 3 )); then
+    print_error "Max attempts reached for old private keys."
+    return 1
+  fi
+
+  # WARNING prompt to fund wallets
+  print_warning_fill_wallets
+
+  if [[ "$attester_mode" == "new" ]]; then
+    for (( i=0; i<num_validators; i++ )); do
+      eth_priv=$(jq -r ".validators[$i].attester.eth" "$KEYFILE")
+      if [[ -z "$eth_priv" || "$eth_priv" == "null" ]]; then
+        print_error "Missing ETH key for validator $((i+1))"
+        return 1
+      fi
+      # Ensure eth_priv has 0x prefix
+      eth_priv_lc="${eth_priv,,}"
+      if [[ ! "$eth_priv_lc" =~ ^0x ]]; then
+        eth_priv_lc="0x$eth_priv_lc"
+      fi
+      new_eth_private_keys+=("$eth_priv_lc")
+      eth_addr=$(NODE_PATH="$NODE_MODULES_DIR" node --input-type=module -e "
+import { Wallet } from 'ethers';
+console.log(new Wallet('$eth_priv_lc').address);
+      ")
+      attesters+=("$eth_addr")
+    done
+  else
+    tries=0
+    while (( tries < 3 )); do
+      print_message "Enter OLD attester addresses (comma-separated, $num_validators addresses)"
+      print_prompt
+      read input_addrs
+      IFS=',' read -ra parts <<< "$input_addrs"
+      if [[ "${#parts[@]}" -ne num_validators ]]; then
+        print_error "Expected $num_validators addresses but got ${#parts[@]}"
+        ((tries++))
+        continue
+      fi
+      valid=true
+      for i in "${!parts[@]}"; do
+        addr="${parts[i],,}"
+        if [[ ! "$addr" =~ ^0x ]]; then
+          addr="0x$addr"
+        fi
+        if [[ ! "$addr" =~ ^0x[a-f0-9]{40}$ ]]; then
+          valid=false
+          break
+        fi
+        parts[i]="$addr"
+      done
+      if $valid; then
+        attesters=("${parts[@]}")
+        break
+      else
+        print_error "Invalid address format detected."
+        ((tries++))
+      fi
+    done
+    if (( tries == 3 )); then
+      print_error "Max attempts reached for old attester addresses."
+      return 1
+    fi
+  fi
+
+  # Main Withdrawer address input with normalization and validation
+  tries=0
+  while (( tries < 3 )); do
+    print_message "Enter main Withdrawer address"
+    print_prompt
+    read main_withdrawer
+    main_withdrawer="${main_withdrawer,,}"
+    if [[ ! "$main_withdrawer" =~ ^0x ]]; then
+      main_withdrawer="0x$main_withdrawer"
+    fi
+    if [[ ${#main_withdrawer} -ne 42 || ! "$main_withdrawer" =~ ^0x[a-f0-9]{40}$ ]]; then
+      print_error "Invalid address format."
+      ((tries++))
+      continue
+    fi
+    break
+  done
+  if (( tries == 3 )); then
+    print_error "Max attempts reached for main withdrawer address."
+    return 1
+  fi
+
+  print_input_summary
+
+  clear
+  echo "=================================================="
+  echo "                 AZTEC VALIDATOR SETUP            "
+  echo "=================================================="
+  if [[ "$attester_mode" == "new" ]]; then
+    printf "New Mnemonic For ETH/BLS  : %s\n" "$bls_mnemonic"
+  else
+    printf "New Mnemonic For BLS      : %s\n" "$bls_mnemonic"
+  fi
+  printf "Main Withdrawer           : %s\n" "$main_withdrawer"
+  echo "=================================================="
+  for (( i=0; i<num_validators; i++ )); do
+    idx=$((i+1))
+    echo "Validator $idx:"
+    printf "  Old Attester PK        : %s\n" "${private_keys[i]}"
+    if [[ "$attester_mode" == "new" ]]; then
+      printf "  New Attester PK        : %s\n" "${new_eth_private_keys[i]}"
+    fi
+    printf "  Attester type          : %s\n" "$attester_mode"
+    printf "  Attester               : %s\n" "${attesters[i]}"
+    printf "  BLS key                : %s\n" "${bls_keys[i]}"
+    echo
+  done
+  summary_file="$HOME/aztec-keys.json"
+  [ -f "$summary_file" ] && rm -f "$summary_file"
+  cat > "$summary_file" <<EOF
+{
+  "new_bls_mnemonic": "$( [[ "$attester_mode" == "old" ]] && echo "$bls_mnemonic" || echo "" )",
+  "new_eth_bls_mnemonic": "$( [[ "$attester_mode" == "new" ]] && echo "$bls_mnemonic" || echo "" )",
+  "main_withdrawer": "$main_withdrawer",
+  "validators": [
+$(for i in $(seq 0 $((num_validators-1)) ); do
+  old_pk="${private_keys[i]}"
+  new_pk=""
+  [[ "$attester_mode" == "new" ]] && new_pk="${new_eth_private_keys[i]}"
+  attest_type="$attester_mode"
+  attester_addr="${attesters[i]}"
+  bls_key="${bls_keys[i]}"
+  echo "    {"
+  echo "      \"validator\": $((i+1)),"
+  echo "      \"old_attester_private_key\": \"$old_pk\","
+  if [[ -n "$new_pk" ]]; then
+    echo "      \"new_attester_private_key\": \"$new_pk\","
+  fi
+  echo "      \"attester_type\": \"$attest_type\","
+  echo "      \"attester\": \"$attester_addr\","
+  echo "      \"bls_key\": \"$bls_key\""
+  echo "    }$( [ $i -lt $((num_validators-1)) ] && echo "," )"
+done)
+  ]
+}
+EOF
+
+  echo -ne "Proceed with approval and registration? (yes/no): "
+  read confirm
+  [[ "$confirm" =~ ^[Yy][Ee]?[Ss]?$ ]] || { echo "Aborted."; return 0; }
+
+  clear
+  echo "Running approvals and registrations..."
+  echo "=================================================="
+
+  for (( i=0; i<num_validators; i++ )); do
+    idx=$((i+1))
+    private_key="${private_keys[i]}"
+    attester="${attesters[i]}"
+    bls_key="${bls_keys[i]}"
+
+    # Ensure private key has 0x prefix before calling cast
+    pk="${private_key,,}"
+    if [[ ! "$pk" =~ ^0x ]]; then
+      pk="0x$pk"
+    fi
+
+    echo "Validator $idx: Approving 200k STAKE..."
+    cast send "$STAKE_CONTRACT" "approve(address,uint256)" \
+      "$ROLLUP_ADDRESS" "$STAKE_AMOUNT" --private-key "$pk" --rpc-url "$ETH_RPC"
+    if [ $? -ne 0 ]; then
+      print_error "Approval failed for validator $idx"
+      return 1
+    fi
+
+    # Ensure attester address has 0x prefix before using
+    att="${attester,,}"
+    if [[ ! "$att" =~ ^0x ]]; then
+      att="0x$att"
+    fi
+
+    echo "Validator $idx: Adding validator to testnet..."
+    aztec add-l1-validator --l1-rpc-urls "$ETH_RPC" --network testnet \
+      --private-key "$pk" --attester "$att" --withdrawer "$main_withdrawer" --bls-secret-key "$bls_key" --rollup "$ROLLUP_ADDRESS"
+    if [ $? -ne 0 ]; then
+      print_error "Validator addition failed for validator $idx"
+      return 1
+    fi
+    echo
+  done
+
+  echo "All validators processed successfully."
+  echo
+  print_reminders_colored
+
+  return 0
+}
+
+main "$@" || echo "Script terminated with errors or was aborted."
