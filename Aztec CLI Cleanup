@@ -1,0 +1,51 @@
+# --- Forceful Cleanup Section ---
+# Forcibly stop and remove all Aztec-related Docker containers
+sudo docker ps -a --format '{{.ID}} {{.Image}}' | grep -i aztec | awk '{print $1}' | xargs -r sudo docker rm -f
+
+# Quit all Aztec-related screen sessions
+screen -ls | grep -i aztec | awk '{print $1}' | xargs -r -I {} screen -X -S {} quit
+
+# Forcibly remove all Aztec-related Docker images
+sudo docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep -i aztec | awk '{print $2}' | sort | uniq | xargs -r sudo docker rmi -f
+
+# Forcefully remove the ~/.aztec/ directory
+sudo rm -rf ~/.aztec/
+
+# --- Verification Section ---
+echo "---------------"
+echo "Verification results:"
+echo "---------------"
+
+# Check Docker containers
+sudo docker ps -a --format '{{.Image}}' | grep -i aztec > /dev/null
+if [ $? -eq 0 ]; then
+    echo "[!] Some Aztec-related Docker containers are still present."
+else
+    echo "[✓] No Aztec-related Docker containers found."
+fi
+
+# Check Docker images
+sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep -i aztec > /dev/null
+if [ $? -eq 0 ]; then
+    echo "[!] Some Aztec-related Docker images are still present."
+else
+    echo "[✓] No Aztec-related Docker images found."
+fi
+
+# Check screen sessions
+screen -ls | grep -i aztec > /dev/null
+if [ $? -eq 0 ]; then
+    echo "[!] Some Aztec-related screen sessions are still running."
+else
+    echo "[✓] No Aztec-related screen sessions found."
+fi
+
+# Check .aztec directory
+if [ -d ~/.aztec/ ]; then
+    echo "[!] The ~/.aztec/ directory still exists."
+else
+    echo "[✓] The ~/.aztec/ directory has been removed."
+fi
+
+echo "---------------"
+echo "Cleanup complete and verified!"

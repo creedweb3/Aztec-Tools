@@ -1,0 +1,56 @@
+#!/bin/bash
+
+GREEN='\033[1;32m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+NC='\033[0m'
+
+header() {
+  echo -e "${CYAN}=============================="
+  echo -e "   Aztec L2 Block & Proof Finder"
+  echo -e "==============================${NC}"
+}
+
+get_block() {
+  curl -s -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","method":"node_getL2Tips","params":[],"id":67}' \
+    http://localhost:$1/ | jq -r ".result.proven.number"
+}
+
+header
+
+port=8080
+block=$(get_block $port)
+
+if [[ -z "$block" || "$block" == "null" ]]; then
+  aztec_port=$(docker ps --filter name=aztec --format "{{.Ports}}" | grep -oP '0.0.0.0:\K\d+(?=->)')
+  [[ -n "$aztec_port" ]] && { port=$aztec_port; block=$(get_block $port); }
+fi
+
+if [[ -z "$block" || "$block" == "null" ]]; then
+  echo -e "${RED}Could not fetch block number from default or docker port.${NC}"
+  read -p "Enter Aztec node HTTP API port (or Enter to quit): " custom_port
+  [[ -z "$custom_port" ]] && exit 1
+  port=$custom_port
+  block=$(get_block $port)
+fi
+
+if [[ -z "$block" || "$block" == "null" ]]; then
+  echo -e "${RED}Error: Could not fetch block number from port $port.${NC}"
+  exit 1
+fi
+
+proof=$(curl -s -X POST -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"node_getArchiveSiblingPath\",\"params\":[\"$block\",\"$block\"],\"id\":67}" \
+  http://localhost:$port/ | jq -r ".result")
+
+if [[ -z "$proof" || "$proof" == "null" ]]; then
+  echo -e "${RED}Error: Could not fetch proof for block $block on port $port.${NC}"
+  exit 1
+fi
+
+echo -e "\n${GREEN}✅ Success${NC}"
+echo -e "${GREEN}├─ Node URL:${NC} http://localhost:$port"
+echo -e "${GREEN}├─ Block Number:${NC} $block"
+echo -e "${GREEN}└─ Proof:${NC}\n$proof"
+echo -e "${CYAN}==============================${NC}"
